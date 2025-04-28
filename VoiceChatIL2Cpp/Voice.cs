@@ -103,34 +103,6 @@ public class Voice
             SteamNetworking.SendP2PPacket(peer, il2cppPacket, (uint)il2cppPacket.Length, EP2PSend.k_EP2PSendUnreliableNoDelay);
     }
 
-    public static void ReceiveAndPro12cessVoiceData()
-    {
-        Task.Run(() =>
-        {
-            while (SteamNetworking.IsP2PPacketAvailable(out uint size))
-            {
-                var buffer = new Il2CppStructArray<byte>((long)size);
-                if (SteamNetworking.ReadP2PPacket(buffer, size, out uint bytesRead, out CSteamID sender) && bytesRead > 8)
-                {
-                    byte[] managedBytes = buffer.Take((int)bytesRead).ToArray();
-                    long seq = BitConverter.ToInt64(managedBytes, 0);
-                    if (receivedSequences.Contains(seq)) continue;
-                    receivedSequences.Add(seq);
-
-                    byte[] voiceData = new byte[bytesRead - 8];
-                    Buffer.BlockCopy(managedBytes, 8, voiceData, 0, voiceData.Length);
-
-                    if (!voiceBuffers.ContainsKey(sender))
-                        voiceBuffers[sender] = new SimpleCircularBuffer<byte[]>(BufferSize);
-
-                    voiceBuffers[sender].Enqueue(voiceData);
-                    ProcessBufferedPackets(sender);
-                }
-
-            }
-        });
-    }
-
     public static async Task ReceiveAndProcessVoiceDataAsync()
     {
         while (true)
