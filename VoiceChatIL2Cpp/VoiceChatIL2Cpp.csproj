@@ -463,7 +463,6 @@
 
 	<ItemGroup>
 		<Compile Include="Core.cs" />
-		<Compile Include="Dispatcher.cs" />
 		<Compile Include="Logger.cs" />
 		<Compile Include="Voice.cs" />
 		<Compile Include="VoiceChatSliderInjector.cs" />
