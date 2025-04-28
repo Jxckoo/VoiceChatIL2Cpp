@@ -1,23 +1,29 @@
-﻿using Il2CppInterop.Runtime.InteropTypes.Arrays;
+﻿using Il2CppInterop.Runtime;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Il2CppScheduleOne.Networking;
 using Il2CppScheduleOne.PlayerScripts;
 using Il2CppSteamworks;
 using MelonLoader;
 using UnityEngine;
 using VoiceChatIL2Cpp;
+using static UnityEngine.AudioClip;
 
-public class Voice
+public class Voice : MonoBehaviour
 {
-    private class VoicePlaybackBuffer
+    public class VoicePlaybackBuffer
     {
         public AudioSource Source;
         public AudioClip Clip;
         public float[] Buffer;
         public int SampleRate;
         public int WriteIndex;
+        public int ReadIndex;
         public int BufferLength;
         public float LastPacketTime;
+
+        public Action<float[]> OnReadCallback;
     }
+
 
     public static bool isRecording = false;
     public static bool isDebugging = true;
@@ -155,18 +161,10 @@ public class Voice
         public static float VoiceChatVolume = 2.0f;
     }
 
-    private static void PlayVoiceData(CSteamID sender, byte[] data, uint size)
+    public static void PlayVoiceData(CSteamID sender, byte[] data, uint size)
     {
         if (size < 2 || data == null) return;
-
         float now = Time.time;
-
-        if (!Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1)
-        {
-            Logger.Log("Player is not in a lobby or is alone, clearing playback buffers...");
-            MainThreadDispatcher.RunOnMainThread(ClearPlaybackBuffers);
-            return;
-        }
 
         int sampleCount = (int)(size / 2);
         float[] samples = new float[sampleCount];
@@ -180,14 +178,53 @@ public class Voice
         {
             if (!playbackBuffers.TryGetValue(sender, out var buffer))
             {
-                GameObject obj = new($"Voice_{sender}");
+                var obj = new GameObject($"Voice_{sender}");
                 var source = obj.AddComponent<AudioSource>();
+
+                int clipSamples = (int)(_optimalSampleRate * 3f); // 3 seconds buffer
+                var playbackBuffer = new VoicePlaybackBuffer();
+                playbackBuffer.Buffer = new float[clipSamples];
+                playbackBuffer.BufferLength = clipSamples;
+                playbackBuffer.SampleRate = (int)_optimalSampleRate;
+                playbackBuffer.WriteIndex = 0;
+                playbackBuffer.ReadIndex = 0;
+                playbackBuffer.LastPacketTime = now;
+
+                void PCMReader(float[] data)
+                {
+                    for (int i = 0; i < data.Length; i++)
+                    {
+                        data[i] = playbackBuffer.Buffer[playbackBuffer.ReadIndex];
+                        playbackBuffer.ReadIndex = (playbackBuffer.ReadIndex + 1) % playbackBuffer.BufferLength;
+                    }
+                }
+
+                playbackBuffer.OnReadCallback = PCMReader;
+
+                PCMReaderCallback pcmReaderCallback = DelegateSupport.ConvertDelegate<PCMReaderCallback>(PCMReader);
+
+                var clip = AudioClip.Create(
+                    $"VoiceClip_{sender}",
+                    clipSamples,
+                    1,
+                    (int)_optimalSampleRate,
+                    true,
+                    pcmReaderCallback,
+                    null
+                );
+
                 source.spatialBlend = 1f;
                 source.minDistance = 1f;
-                source.maxDistance = VoiceRange;
+                source.maxDistance = 15f;
                 source.rolloffMode = AudioRolloffMode.Linear;
-                source.volume = VoiceChatSettings.VoiceChatVolume;
+                source.volume = 1.5f;
                 source.loop = true;
+                source.clip = clip;
+                source.Play();
+
+                playbackBuffer.Source = source;
+                playbackBuffer.Clip = clip;
+                playbackBuffers[sender] = playbackBuffer;
 
                 var senderObj = FindPlayerObject(sender);
                 if (senderObj != null)
@@ -199,37 +236,34 @@ public class Voice
                         source.transform.localPosition = Vector3.zero;
                     }
                 }
-
-                int clipLengthSeconds = 2;
-                int totalSamples = clipLengthSeconds * (int)_optimalSampleRate;
-                var clip = AudioClip.Create($"VoiceClip_{sender}", totalSamples, 1, (int)_optimalSampleRate, false);
-
-                buffer = new VoicePlaybackBuffer
-                {
-                    Source = source,
-                    Clip = clip,
-                    Buffer = new float[totalSamples],
-                    SampleRate = (int)_optimalSampleRate,
-                    WriteIndex = 0,
-                    BufferLength = totalSamples,
-                };
-
-                source.clip = clip;
-                source.Play();
-                playbackBuffers[sender] = buffer;
-                buffer.LastPacketTime = Time.time;
             }
 
+            buffer = playbackBuffers[sender];
             buffer.LastPacketTime = now;
 
-            for (int i = 0; i < samples.Length; i++)
+            foreach (var sample in samples)
             {
-                buffer.Buffer[buffer.WriteIndex] = samples[i];
+                buffer.Buffer[buffer.WriteIndex] = sample;
                 buffer.WriteIndex = (buffer.WriteIndex + 1) % buffer.BufferLength;
             }
-
-            buffer.Clip.SetData(buffer.Buffer, 0);
         });
+    }
+
+    private static void OnAudioRead(float[] data)
+    {
+        foreach (var kvp in playbackBuffers)
+        {
+            var buffer = kvp.Value;
+            if (buffer.Source.clip != null && buffer.Source.isPlaying)
+            {
+                for (int i = 0; i < data.Length; i++)
+                {
+                    data[i] = buffer.Buffer[buffer.ReadIndex];
+                    buffer.ReadIndex = (buffer.ReadIndex + 1) % buffer.BufferLength;
+                }
+                break;
+            }
+        }
     }
 
     private static void ClearPlaybackBuffers()
@@ -250,27 +284,37 @@ public class Voice
     public static void UpdateSilence()
     {
         float now = Time.time;
-
         MainThreadDispatcher.RunOnMainThread(() =>
         {
             foreach (var kvp in playbackBuffers)
             {
                 var buffer = kvp.Value;
-                if (buffer.Clip == null && (!Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1))
-                {
-                    playbackBuffers.Clear();
-                    break;
-                }
-
                 if (now - buffer.LastPacketTime > SilenceTimeout)
                 {
-                    for (int i = 0; i < buffer.BufferLength; i++)
-                        buffer.Buffer[i] = 0f;
-
-                    buffer.Clip.SetData(buffer.Buffer, 0);
+                    buffer.Buffer = new float[buffer.BufferLength];
+                    buffer.WriteIndex = 0;
+                    buffer.ReadIndex = 0;
                 }
             }
         });
+    }
+
+    private static void FillAudioClipData(VoicePlaybackBuffer buffer, float[] data)
+    {
+        int samplesToCopy = data.Length;
+        for (int i = 0; i < samplesToCopy; i++)
+        {
+            if (buffer.ReadIndex != buffer.WriteIndex)
+            {
+                data[i] = buffer.Buffer[buffer.ReadIndex];
+                buffer.ReadIndex = (buffer.ReadIndex + 1) % buffer.BufferLength;
+            }
+            else
+            {
+                // No new voice data -> fill silence
+                data[i] = 0f;
+            }
+        }
     }
 
     private static GameObject FindPlayerObject(CSteamID sender)
