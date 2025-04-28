@@ -5,7 +5,7 @@ using Object = UnityEngine.Object;
 
 public class MainThreadDispatcher : MonoBehaviour
 {
-    private static readonly Il2CppSystem.Collections.Generic.Queue<Action> _mainThreadActions = new Il2CppSystem.Collections.Generic.Queue<Action>();
+    private static readonly System.Collections.Generic.Queue<Action> _mainThreadActions = new System.Collections.Generic.Queue<Action>();
 
     private static MainThreadDispatcher _instance;
 
