@@ -1,29 +1,24 @@
-﻿using Il2CppInterop.Runtime;
-using Il2CppInterop.Runtime.InteropTypes.Arrays;
+﻿using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Il2CppScheduleOne.Networking;
 using Il2CppScheduleOne.PlayerScripts;
 using Il2CppSteamworks;
 using MelonLoader;
 using UnityEngine;
 using VoiceChatIL2Cpp;
-using static UnityEngine.AudioClip;
 
-public class Voice : MonoBehaviour
+public class Voice
 {
-    public class VoicePlaybackBuffer
+    private class VoicePlaybackBuffer
     {
         public AudioSource Source;
         public AudioClip Clip;
         public float[] Buffer;
         public int SampleRate;
         public int WriteIndex;
-        public int ReadIndex;
         public int BufferLength;
         public float LastPacketTime;
-
-        public Action<float[]> OnReadCallback;
+        public int ReadIndex = 0;
     }
-
 
     public static bool isRecording = false;
     public static bool isDebugging = true;
@@ -108,29 +103,67 @@ public class Voice : MonoBehaviour
             SteamNetworking.SendP2PPacket(peer, il2cppPacket, (uint)il2cppPacket.Length, EP2PSend.k_EP2PSendUnreliableNoDelay);
     }
 
-    public static void ReceiveAndProcessVoiceData()
+    public static void ReceiveAndPro12cessVoiceData()
     {
-        while (SteamNetworking.IsP2PPacketAvailable(out uint size))
+        Task.Run(() =>
         {
-            var buffer = new Il2CppStructArray<byte>((long)size);
-            if (SteamNetworking.ReadP2PPacket(buffer, size, out uint bytesRead, out CSteamID sender) && bytesRead > 8)
+            while (SteamNetworking.IsP2PPacketAvailable(out uint size))
             {
-                byte[] managedBytes = buffer.Take((int)bytesRead).ToArray();
-                long seq = BitConverter.ToInt64(managedBytes, 0);
-                if (receivedSequences.Contains(seq)) continue;
-                receivedSequences.Add(seq);
+                var buffer = new Il2CppStructArray<byte>((long)size);
+                if (SteamNetworking.ReadP2PPacket(buffer, size, out uint bytesRead, out CSteamID sender) && bytesRead > 8)
+                {
+                    byte[] managedBytes = buffer.Take((int)bytesRead).ToArray();
+                    long seq = BitConverter.ToInt64(managedBytes, 0);
+                    if (receivedSequences.Contains(seq)) continue;
+                    receivedSequences.Add(seq);
 
-                byte[] voiceData = new byte[bytesRead - 8];
-                Buffer.BlockCopy(managedBytes, 8, voiceData, 0, voiceData.Length);
+                    byte[] voiceData = new byte[bytesRead - 8];
+                    Buffer.BlockCopy(managedBytes, 8, voiceData, 0, voiceData.Length);
 
-                if (!voiceBuffers.ContainsKey(sender))
-                    voiceBuffers[sender] = new SimpleCircularBuffer<byte[]>(BufferSize);
+                    if (!voiceBuffers.ContainsKey(sender))
+                        voiceBuffers[sender] = new SimpleCircularBuffer<byte[]>(BufferSize);
 
-                voiceBuffers[sender].Enqueue(voiceData);
-                ProcessBufferedPackets(sender);
+                    voiceBuffers[sender].Enqueue(voiceData);
+                    ProcessBufferedPackets(sender);
+                }
+
+            }
+        });
+    }
+
+    public static async Task ReceiveAndProcessVoiceDataAsync()
+    {
+        while (true)
+        {
+            await Task.Yield();
+
+            if (SteamNetworking.IsP2PPacketAvailable(out uint size))
+            {
+                var buffer = new Il2CppStructArray<byte>((long)size);
+                if (SteamNetworking.ReadP2PPacket(buffer, size, out uint bytesRead, out CSteamID sender) && bytesRead > 8)
+                {
+                    byte[] managedBytes = buffer.Take((int)bytesRead).ToArray();
+                    long seq = BitConverter.ToInt64(managedBytes, 0);
+                    if (receivedSequences.Contains(seq)) continue;
+                    receivedSequences.Add(seq);
+
+                    byte[] voiceData = new byte[bytesRead - 8];
+                    Buffer.BlockCopy(managedBytes, 8, voiceData, 0, voiceData.Length);
+
+                    if (!voiceBuffers.ContainsKey(sender))
+                        voiceBuffers[sender] = new SimpleCircularBuffer<byte[]>(BufferSize);
+
+                    voiceBuffers[sender].Enqueue(voiceData);
+                    ProcessBufferedPackets(sender);
+                }
+            }
+            else
+            {
+                await Task.Delay(10);
             }
         }
     }
+
 
     private static void ProcessBufferedPackets(CSteamID sender)
     {
@@ -161,10 +194,18 @@ public class Voice : MonoBehaviour
         public static float VoiceChatVolume = 2.0f;
     }
 
-    public static void PlayVoiceData(CSteamID sender, byte[] data, uint size)
+    private static void PlayVoiceData(CSteamID sender, byte[] data, uint size)
     {
         if (size < 2 || data == null) return;
+
         float now = Time.time;
+
+        if (!Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1)
+        {
+            Logger.Log("Player is not in a lobby or is alone, clearing playback buffers...");
+            MainThreadDispatcher.RunOnMainThread(ClearPlaybackBuffers);
+            return;
+        }
 
         int sampleCount = (int)(size / 2);
         float[] samples = new float[sampleCount];
@@ -178,53 +219,14 @@ public class Voice : MonoBehaviour
         {
             if (!playbackBuffers.TryGetValue(sender, out var buffer))
             {
-                var obj = new GameObject($"Voice_{sender}");
+                GameObject obj = new($"Voice_{sender}");
                 var source = obj.AddComponent<AudioSource>();
-
-                int clipSamples = (int)(_optimalSampleRate * 3f); // 3 seconds buffer
-                var playbackBuffer = new VoicePlaybackBuffer();
-                playbackBuffer.Buffer = new float[clipSamples];
-                playbackBuffer.BufferLength = clipSamples;
-                playbackBuffer.SampleRate = (int)_optimalSampleRate;
-                playbackBuffer.WriteIndex = 0;
-                playbackBuffer.ReadIndex = 0;
-                playbackBuffer.LastPacketTime = now;
-
-                void PCMReader(float[] data)
-                {
-                    for (int i = 0; i < data.Length; i++)
-                    {
-                        data[i] = playbackBuffer.Buffer[playbackBuffer.ReadIndex];
-                        playbackBuffer.ReadIndex = (playbackBuffer.ReadIndex + 1) % playbackBuffer.BufferLength;
-                    }
-                }
-
-                playbackBuffer.OnReadCallback = PCMReader;
-
-                PCMReaderCallback pcmReaderCallback = DelegateSupport.ConvertDelegate<PCMReaderCallback>(PCMReader);
-
-                var clip = AudioClip.Create(
-                    $"VoiceClip_{sender}",
-                    clipSamples,
-                    1,
-                    (int)_optimalSampleRate,
-                    true,
-                    pcmReaderCallback,
-                    null
-                );
-
                 source.spatialBlend = 1f;
                 source.minDistance = 1f;
-                source.maxDistance = 15f;
+                source.maxDistance = VoiceRange;
                 source.rolloffMode = AudioRolloffMode.Linear;
-                source.volume = 1.5f;
+                source.volume = VoiceChatSettings.VoiceChatVolume;
                 source.loop = true;
-                source.clip = clip;
-                source.Play();
-
-                playbackBuffer.Source = source;
-                playbackBuffer.Clip = clip;
-                playbackBuffers[sender] = playbackBuffer;
 
                 var senderObj = FindPlayerObject(sender);
                 if (senderObj != null)
@@ -236,34 +238,37 @@ public class Voice : MonoBehaviour
                         source.transform.localPosition = Vector3.zero;
                     }
                 }
+
+                int clipLengthSeconds = 2;
+                int totalSamples = clipLengthSeconds * (int)_optimalSampleRate;
+                var clip = AudioClip.Create($"VoiceClip_{sender}", totalSamples, 1, (int)_optimalSampleRate, false);
+
+                buffer = new VoicePlaybackBuffer
+                {
+                    Source = source,
+                    Clip = clip,
+                    Buffer = new float[totalSamples],
+                    SampleRate = (int)_optimalSampleRate,
+                    WriteIndex = 0,
+                    BufferLength = totalSamples,
+                };
+
+                source.clip = clip;
+                source.Play();
+                playbackBuffers[sender] = buffer;
+                buffer.LastPacketTime = Time.time;
             }
 
-            buffer = playbackBuffers[sender];
             buffer.LastPacketTime = now;
 
-            foreach (var sample in samples)
+            for (int i = 0; i < samples.Length; i++)
             {
-                buffer.Buffer[buffer.WriteIndex] = sample;
+                buffer.Buffer[buffer.WriteIndex] = samples[i];
                 buffer.WriteIndex = (buffer.WriteIndex + 1) % buffer.BufferLength;
             }
-        });
-    }
 
-    private static void OnAudioRead(float[] data)
-    {
-        foreach (var kvp in playbackBuffers)
-        {
-            var buffer = kvp.Value;
-            if (buffer.Source.clip != null && buffer.Source.isPlaying)
-            {
-                for (int i = 0; i < data.Length; i++)
-                {
-                    data[i] = buffer.Buffer[buffer.ReadIndex];
-                    buffer.ReadIndex = (buffer.ReadIndex + 1) % buffer.BufferLength;
-                }
-                break;
-            }
-        }
+            buffer.Clip.SetData(buffer.Buffer, 0);
+        });
     }
 
     private static void ClearPlaybackBuffers()
@@ -283,38 +288,28 @@ public class Voice : MonoBehaviour
 
     public static void UpdateSilence()
     {
-        float now = Time.time;
-        MainThreadDispatcher.RunOnMainThread(() =>
+        Task.Run(() =>
         {
+            float now = Time.time;
+
             foreach (var kvp in playbackBuffers)
             {
                 var buffer = kvp.Value;
+                if (buffer.Clip == null && (!Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1))
+                {
+                    playbackBuffers.Clear();
+                    break;
+                }
+
                 if (now - buffer.LastPacketTime > SilenceTimeout)
                 {
-                    buffer.Buffer = new float[buffer.BufferLength];
-                    buffer.WriteIndex = 0;
-                    buffer.ReadIndex = 0;
+                    for (int i = 0; i < buffer.BufferLength; i++)
+                        buffer.Buffer[i] = 0f;
+
+                    buffer.Clip.SetData(buffer.Buffer, 0);
                 }
             }
         });
-    }
-
-    private static void FillAudioClipData(VoicePlaybackBuffer buffer, float[] data)
-    {
-        int samplesToCopy = data.Length;
-        for (int i = 0; i < samplesToCopy; i++)
-        {
-            if (buffer.ReadIndex != buffer.WriteIndex)
-            {
-                data[i] = buffer.Buffer[buffer.ReadIndex];
-                buffer.ReadIndex = (buffer.ReadIndex + 1) % buffer.BufferLength;
-            }
-            else
-            {
-                // No new voice data -> fill silence
-                data[i] = 0f;
-            }
-        }
     }
 
     private static GameObject FindPlayerObject(CSteamID sender)
@@ -359,46 +354,3 @@ public class Voice : MonoBehaviour
 }
 
 
-public class SimpleCircularBuffer<T>
-{
-    private T[] _buffer;
-    private int _head;
-    private int _tail;
-    private int _count;
-    private int _capacity;
-
-    public int Count => _count;
-
-    public SimpleCircularBuffer(int capacity)
-    {
-        _capacity = capacity;
-        _buffer = new T[capacity];
-        _head = 0;
-        _tail = 0;
-        _count = 0;
-    }
-
-    public void Enqueue(T item)
-    {
-        if (_count == _capacity)
-        {
-            _tail = (_tail + 1) % _capacity;
-        }
-        else
-        {
-            _count++;
-        }
-        _buffer[_head] = item;
-        _head = (_head + 1) % _capacity;
-    }
-
-    public T Dequeue()
-    {
-        if (_count == 0) throw new InvalidOperationException("Buffer is empty");
-
-        T value = _buffer[_tail];
-        _tail = (_tail + 1) % _capacity;
-        _count--;
-        return value;
-    }
-}

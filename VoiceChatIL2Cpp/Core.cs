@@ -39,11 +39,6 @@ namespace VoiceChatIL2Cpp
             }
         }
 
-        public override void OnSceneWasLoaded(int buildIndex, string sceneName)
-        {
-            // if(sceneName == "Main" && )
-        }
-
         public static event Action<CSteamID> OnCurrentLobbyChanged;
 
         public override void OnInitializeMelon()
@@ -74,18 +69,29 @@ namespace VoiceChatIL2Cpp
             {
                 if (receiveTask == null || receiveTask.IsCompleted)
                 {
-                    receiveTask = Task.Run(() => Voice.ReceiveAndProcessVoiceData());
+                    receiveTask = ReceiveAndProcessVoiceDataAsync();
                 }
 
                 Voice.UpdateSilence();
 
                 if (sendTask == null || sendTask.IsCompleted)
                 {
-                    sendTask = Task.Run(() => Voice.CaptureAndSendVoiceData());
+                    sendTask = CaptureAndSendVoiceDataAsync();
                 }
             }
         }
 
+        private async Task ReceiveAndProcessVoiceDataAsync()
+        {
+            await Task.Yield();
+            await Voice.ReceiveAndProcessVoiceDataAsync();
+        }
+
+        private async Task CaptureAndSendVoiceDataAsync()
+        {
+            await Task.Yield();
+            Voice.CaptureAndSendVoiceData();
+        }
 
         private bool hasInjectedMainMenu = false;
         private bool hasInjectedInGame = false;

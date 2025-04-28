@@ -462,12 +462,12 @@
 	</PropertyGroup>
 
 	<ItemGroup>
+		<Compile Include="Buffer.cs" />
 		<Compile Include="Core.cs" />
 		<Compile Include="Dispatcher.cs" />
 		<Compile Include="Logger.cs" />
 		<Compile Include="Voice.cs" />
 		<Compile Include="VoiceChatSliderInjector.cs" />
-		<Compile Include="VoiceSource.cs" />
 	</ItemGroup>
 	
 	<Target Name="PostBuild" AfterTargets="PostBuildEvent">
