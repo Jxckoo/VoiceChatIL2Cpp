@@ -19,7 +19,6 @@ public class Voice
         public float LastPacketTime;
     }
 
-
     public static bool isRecording = false;
     public static bool isDebugging = true;
     public static bool isInit = false;
@@ -37,7 +36,7 @@ public class Voice
     public static void Initialize()
     {
         _optimalSampleRate = SteamUser.GetVoiceOptimalSampleRate();
-        EnsureListenerExists();
+        MainThreadDispatcher.RunOnMainThread(EnsureListenerExists);
         isInit = true;
 
         MelonLogger.Msg($"[Voice] Initialized with sample rate {_optimalSampleRate} Hz");
@@ -45,11 +44,15 @@ public class Voice
 
     public static void SetAllSourceVolume(float value)
     {
-        foreach (var kvp in playbackBuffers)
+        MainThreadDispatcher.RunOnMainThread(() =>
         {
-            var buffer = kvp.Value;
-            buffer.Source.volume = value;
-        }
+            foreach (var kvp in playbackBuffers)
+            {
+                var buffer = kvp.Value;
+                if (buffer.Source != null)
+                    buffer.Source.volume = value;
+            }
+        });
     }
 
     public static void StartVoiceRecording()
@@ -146,6 +149,7 @@ public class Voice
         byte[] pcmData = buffer.Take((int)decompressed).ToArray();
         PlayVoiceData(sender, pcmData, decompressed);
     }
+
     public static class VoiceChatSettings
     {
         public static float VoiceChatVolume = 2.0f;
@@ -153,14 +157,14 @@ public class Voice
 
     private static void PlayVoiceData(CSteamID sender, byte[] data, uint size)
     {
-
         if (size < 2 || data == null) return;
+
         float now = Time.time;
 
         if (!Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1)
         {
             Logger.Log("Player is not in a lobby or is alone, clearing playback buffers...");
-            ClearPlaybackBuffers();
+            MainThreadDispatcher.RunOnMainThread(ClearPlaybackBuffers);
             return;
         }
 
@@ -172,66 +176,62 @@ public class Voice
             samples[i] = Mathf.Clamp(sample / 32768f * VoiceGain, -1f, 1f);
         }
 
-        if (!playbackBuffers.TryGetValue(sender, out var buffer))
+        MainThreadDispatcher.RunOnMainThread(() =>
         {
-            GameObject obj = new($"Voice_{sender}");
-            var source = obj.AddComponent<AudioSource>();
-            source.spatialBlend = 1f;
-            source.minDistance = 1f;
-            source.maxDistance = VoiceRange;
-            source.rolloffMode = AudioRolloffMode.Linear;
-            source.volume = VoiceChatSettings.VoiceChatVolume;
-            source.loop = true;
-
-            var senderObj = FindPlayerObject(sender);
-            if (senderObj != null)
+            if (!playbackBuffers.TryGetValue(sender, out var buffer))
             {
-                var player = senderObj.GetComponent<Player>();
-                if (player != null && player.Avatar != null)
+                GameObject obj = new($"Voice_{sender}");
+                var source = obj.AddComponent<AudioSource>();
+                source.spatialBlend = 1f;
+                source.minDistance = 1f;
+                source.maxDistance = VoiceRange;
+                source.rolloffMode = AudioRolloffMode.Linear;
+                source.volume = VoiceChatSettings.VoiceChatVolume;
+                source.loop = true;
+
+                var senderObj = FindPlayerObject(sender);
+                if (senderObj != null)
                 {
-                    source.transform.SetParent(player.Avatar.transform);
-                    source.transform.localPosition = Vector3.zero;
+                    var player = senderObj.GetComponent<Player>();
+                    if (player != null && player.Avatar != null)
+                    {
+                        source.transform.SetParent(player.Avatar.transform);
+                        source.transform.localPosition = Vector3.zero;
+                    }
                 }
+
+                int clipLengthSeconds = 2;
+                int totalSamples = clipLengthSeconds * (int)_optimalSampleRate;
+                var clip = AudioClip.Create($"VoiceClip_{sender}", totalSamples, 1, (int)_optimalSampleRate, false);
+
+                buffer = new VoicePlaybackBuffer
+                {
+                    Source = source,
+                    Clip = clip,
+                    Buffer = new float[totalSamples],
+                    SampleRate = (int)_optimalSampleRate,
+                    WriteIndex = 0,
+                    BufferLength = totalSamples,
+                };
+
+                source.clip = clip;
+                source.Play();
+                playbackBuffers[sender] = buffer;
+                buffer.LastPacketTime = Time.time;
             }
 
-            int clipLengthSeconds = 2;
-            int totalSamples = clipLengthSeconds * (int)_optimalSampleRate;
-            var clip = AudioClip.Create($"VoiceClip_{sender}", totalSamples, 1, (int)_optimalSampleRate, false);
+            buffer.LastPacketTime = now;
 
-            buffer = new VoicePlaybackBuffer
+            for (int i = 0; i < samples.Length; i++)
             {
-                Source = source,
-                Clip = clip,
-                Buffer = new float[totalSamples],
-                SampleRate = (int)_optimalSampleRate,
-                WriteIndex = 0,
-                BufferLength = totalSamples,
-            };
+                buffer.Buffer[buffer.WriteIndex] = samples[i];
+                buffer.WriteIndex = (buffer.WriteIndex + 1) % buffer.BufferLength;
+            }
 
-            source.clip = clip;
-            source.Play();
-            playbackBuffers[sender] = buffer;
-            buffer.LastPacketTime = Time.time;
-        }
-
-        buffer.LastPacketTime = now;
-
-        for (int i = 0; i < samples.Length; i++)
-        {
-            buffer.Buffer[buffer.WriteIndex] = samples[i];
-            buffer.WriteIndex = (buffer.WriteIndex + 1) % buffer.BufferLength;
-        }
-
-        int startWrite = buffer.WriteIndex - samples.Length;
-        if (startWrite < 0)
-        {
             buffer.Clip.SetData(buffer.Buffer, 0);
-        }
-        else
-        {
-            buffer.Clip.SetData(buffer.Buffer, 0);
-        }
+        });
     }
+
     private static void ClearPlaybackBuffers()
     {
         foreach (var buffer in playbackBuffers.Values)
@@ -251,19 +251,26 @@ public class Voice
     {
         float now = Time.time;
 
-        foreach (var kvp in playbackBuffers)
+        MainThreadDispatcher.RunOnMainThread(() =>
         {
-            var buffer = kvp.Value;
-
-            if (buffer.Clip == null && !Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1) playbackBuffers.Clear();
-            if (now - buffer.LastPacketTime > SilenceTimeout)
+            foreach (var kvp in playbackBuffers)
             {
-                for (int i = 0; i < buffer.BufferLength; i++)
-                    buffer.Buffer[i] = 0f;
+                var buffer = kvp.Value;
+                if (buffer.Clip == null && (!Lobby.Instance.IsInLobby || SteamMatchmaking.GetNumLobbyMembers(Core.CurrentLobbyId) <= 1))
+                {
+                    playbackBuffers.Clear();
+                    break;
+                }
 
-                buffer.Clip.SetData(buffer.Buffer, 0);
+                if (now - buffer.LastPacketTime > SilenceTimeout)
+                {
+                    for (int i = 0; i < buffer.BufferLength; i++)
+                        buffer.Buffer[i] = 0f;
+
+                    buffer.Clip.SetData(buffer.Buffer, 0);
+                }
             }
-        }
+        });
     }
 
     private static GameObject FindPlayerObject(CSteamID sender)
@@ -277,7 +284,7 @@ public class Voice
 
     private static void EnsureListenerExists()
     {
-        if (GameObject.FindObjectOfType<AudioListener>() == null)
+        if (UnityEngine.Object.FindObjectOfType<AudioListener>() == null)
         {
             var listener = new GameObject("AudioListener");
             listener.AddComponent<AudioListener>();
@@ -306,6 +313,7 @@ public class Voice
         if (isDebugging) MelonLogger.Msg($"[Voice] {msg}");
     }
 }
+
 
 public class SimpleCircularBuffer<T>
 {

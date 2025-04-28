@@ -21,7 +21,8 @@ namespace VoiceChatIL2Cpp
 {
     public class Core : MelonMod
     {
-
+        private Task receiveTask;
+        private Task sendTask;
         private static CSteamID _currentLobbyId = CSteamID.Nil;
 
         public static CSteamID CurrentLobbyId
@@ -63,20 +64,28 @@ namespace VoiceChatIL2Cpp
                     Voice.StopVoiceRecording();
                 }
 
-                //Voice.ReceiveVoicePackets();
-
                 InjectSliderIfNeeded();
             }
         }
 
         public override void OnLateUpdate()
         {
+            if (Voice.isInit)
+            {
+                if (receiveTask == null || receiveTask.IsCompleted)
+                {
+                    receiveTask = Task.Run(() => Voice.ReceiveAndProcessVoiceData());
+                }
 
-            Voice.ReceiveAndProcessVoiceData();
-            Voice.UpdateSilence();
-            Voice.CaptureAndSendVoiceData();
+                Voice.UpdateSilence();
 
+                if (sendTask == null || sendTask.IsCompleted)
+                {
+                    sendTask = Task.Run(() => Voice.CaptureAndSendVoiceData());
+                }
+            }
         }
+
 
         private bool hasInjectedMainMenu = false;
         private bool hasInjectedInGame = false;
